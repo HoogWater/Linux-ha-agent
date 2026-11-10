@@ -90,7 +90,13 @@ Exec=sleep infinity
 AutoUpdate=registry
 UNIT
 as_user systemctl --user daemon-reload
-as_user systemctl --user start autoupd.service
+if ! as_user systemctl --user start autoupd.service; then
+  as_user systemctl --user cat autoupd.service || true
+  as_user systemctl --user status --no-pager --full autoupd.service || true
+  journalctl --no-pager -n 60 _SYSTEMD_USER_UNIT=autoupd.service || true
+  as_user systemctl --user show-environment || true
+  exit 1
+fi
 
 # A root container that belongs to another podman instance.
 retry "$PODMAN" pull -q "${REGISTRY}/busybox:1.36"
