@@ -142,7 +142,7 @@ func TestDetect(t *testing.T) {
 		On("command -v \"$1\" >/dev/null 2>&1 sh podman", ok).
 		On("docker version", runner.Result{Stdout: "27.5.1\n"}).
 		On("docker --version", runner.Result{Stdout: "Docker version 27.5.1, build 9f9e405\n"})
-	if es := Detect(context.Background(), both); len(es) != 2 || es[0].Name != "docker" || es[1].Name != "podman" {
+	if es, _ := Detect(context.Background(), both, Podman{}); len(es) != 2 || es[0].Name != "docker" || es[1].Name != "podman" {
 		t.Fatalf("unexpected %+v", es)
 	}
 	shim := (&runner.Fake{}).
@@ -150,19 +150,73 @@ func TestDetect(t *testing.T) {
 		On("command -v \"$1\" >/dev/null 2>&1 sh podman", ok).
 		On("docker version", runner.Result{Stdout: "5.6.1\n"}).
 		On("docker --version", runner.Result{Stdout: "podman version 5.6.1\n"})
-	if es := Detect(context.Background(), shim); len(es) != 1 || es[0].Name != "podman" {
+	if es, _ := Detect(context.Background(), shim, Podman{}); len(es) != 1 || es[0].Name != "podman" {
 		t.Fatalf("podman-docker shim must only count as podman: %+v", es)
 	}
 	none := &runner.Fake{}
-	if es := Detect(context.Background(), none); len(es) != 0 {
+	if es, _ := Detect(context.Background(), none, Podman{}); len(es) != 0 {
 		t.Fatalf("unexpected %+v", es)
 	}
 	noDaemon := (&runner.Fake{}).
 		On("command -v \"$1\" >/dev/null 2>&1 sh docker", ok).
 		On("docker version", runner.Result{ExitCode: 1, Stderr: "Cannot connect to the Docker daemon"}).
 		On("docker --version", runner.Result{Stdout: "Docker version 27.5.1\n"})
-	if es := Detect(context.Background(), noDaemon); len(es) != 0 {
+	if es, _ := Detect(context.Background(), noDaemon, Podman{}); len(es) != 0 {
 		t.Fatalf("docker without daemon must be skipped: %+v", es)
+	}
+}
+
+func TestDetectConfiguredPodman(t *testing.T) {
+	ok := runner.Result{}
+	f := (&runner.Fake{}).
+		On("command -v \"$1\" >/dev/null 2>&1 sh /usr/local/bin/podman", ok).
+		On("id -u mark", runner.Result{Stdout: "1000\n"}).
+		On("ps -a -q --no-trunc", ok)
+	es, err := Detect(context.Background(), f, Podman{Path: "/usr/local/bin/podman", User: "mark"})
+	if err != nil || len(es) != 1 || es[0].Name != "podman" {
+		t.Fatalf("unexpected %+v %v", es, err)
+	}
+	if _, err := es[0].Containers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	if got := last.String(); got != "runuser -u mark -- /usr/local/bin/podman ps -a -q --no-trunc" {
+		t.Fatalf("command: %s", got)
+	}
+	if last.Env["XDG_RUNTIME_DIR"] != "/run/user/1000" || last.Env["DBUS_SESSION_BUS_ADDRESS"] != "unix:path=/run/user/1000/bus" {
+		t.Fatalf("env: %v", last.Env)
+	}
+
+	// A configured podman that is missing, or an unknown user, is an error.
+	if es, err := Detect(context.Background(), &runner.Fake{}, Podman{Path: "/opt/podman"}); err == nil || len(es) != 0 {
+		t.Fatalf("missing podman: %+v %v", es, err)
+	}
+	noUser := (&runner.Fake{}).
+		On("command -v \"$1\" >/dev/null 2>&1 sh podman", ok).
+		On("id -u nobody2", runner.Result{ExitCode: 1, Stderr: "id: 'nobody2': no such user"})
+	if es, err := Detect(context.Background(), noUser, Podman{User: "nobody2"}); err == nil || len(es) != 0 {
+		t.Fatalf("unknown user: %+v %v", es, err)
+	}
+}
+
+func TestPodmanComposeAsUser(t *testing.T) {
+	f := (&runner.Fake{}).
+		On("id -u mark", runner.Result{Stdout: "1000\n"}).
+		On("podman compose version", runner.Result{ExitCode: 125}).
+		On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
+	e, err := Podman{Path: "/usr/local/bin/podman", User: "mark"}.Engine(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := e.compose(context.Background())
+	p := Project{Name: "app", WorkingDir: "/home/mark/app"}
+	pull := tool.pull(p)
+	want := `sh -c cd "$1" && shift && exec "$@" sh /home/mark/app runuser -u mark -- podman-compose --podman-path /usr/local/bin/podman -p app pull`
+	if pull.String() != want || pull.Env["XDG_RUNTIME_DIR"] != "/run/user/1000" {
+		t.Fatalf("pull: %s %v", pull, pull.Env)
+	}
+	if !f.Ran("runuser -u mark -- /usr/local/bin/podman compose version") {
+		t.Fatalf("calls: %v", f.Calls)
 	}
 }
 
