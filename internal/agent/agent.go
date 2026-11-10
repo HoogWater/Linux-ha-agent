@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -43,6 +45,11 @@ type Options struct {
 	Now       func() time.Time
 	// RebootHost reboots the machine; defaults to `systemctl reboot`.
 	RebootHost func(ctx context.Context) error
+	// OperationMarker is a file that exists while an operation that changes
+	// the system (upgrade, restart, restore, reboot) runs. The package's
+	// postinstall script waits for it before restarting an agent that
+	// upgraded itself. Empty: no marker.
+	OperationMarker string
 }
 
 // Agent manages the host and its Incus guests.
@@ -58,6 +65,13 @@ type Agent struct {
 	reboot    func(ctx context.Context) error
 	topics    ha.Topics
 	schedule  cron.Schedule
+
+	// marker is Options.OperationMarker. stopping is closed when shutdown
+	// starts, workerDone when the worker has finished its last operation.
+	marker     string
+	stopping   chan struct{}
+	stopOnce   sync.Once
+	workerDone chan struct{}
 
 	// composeProjects caches incuscompose.Find; see composeDir.
 	composeMu       sync.Mutex
@@ -106,6 +120,9 @@ func New(opts Options) (*Agent, error) {
 		pending:   map[string]bool{},
 		ops:       make(chan op, 256),
 	}
+	a.marker = opts.OperationMarker
+	a.stopping = make(chan struct{})
+	a.workerDone = make(chan struct{})
 	a.idle = sync.NewCond(&a.mu)
 	if a.log == nil {
 		a.log = slog.Default()
@@ -221,6 +238,10 @@ func (a *Agent) Start(ctx context.Context) error {
 	}
 	a.publish(a.host, false)
 
+	go func() {
+		<-ctx.Done()
+		a.stopOnce.Do(func() { close(a.stopping) })
+	}()
 	go a.worker(ctx)
 	if len(a.providers) > 0 {
 		a.enqueue(op{kind: "sync"})
@@ -267,6 +288,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			a.waitWorker()
 			_ = a.mqtt.Publish(a.topics.Availability(), true, []byte("offline"))
 			return nil
 		case <-ticker.C:
@@ -320,8 +342,11 @@ func (a *Agent) WaitIdle() {
 	}
 }
 
+// worker runs the queued operations one at a time. Once ctx is cancelled it
+// starts no new operation, but lets the running one finish (see execute).
 func (a *Agent) worker(ctx context.Context) {
-	for {
+	defer close(a.workerDone)
+	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
@@ -329,7 +354,9 @@ func (a *Agent) worker(ctx context.Context) {
 			a.mu.Lock()
 			delete(a.pending, o.key())
 			a.mu.Unlock()
-			a.execute(ctx, o)
+			if ctx.Err() == nil {
+				a.execute(ctx, o)
+			}
 			a.mu.Lock()
 			a.busy--
 			if a.busy == 0 {
@@ -340,12 +367,68 @@ func (a *Agent) worker(ctx context.Context) {
 	}
 }
 
+// waitWorker waits for the operation running at shutdown.
+func (a *Agent) waitWorker() {
+	select {
+	case <-a.workerDone:
+		return
+	default:
+	}
+	a.log.Info("waiting for the running operation to finish before stopping")
+	<-a.workerDone
+}
+
+// isStopping reports whether shutdown has started.
+func (a *Agent) isStopping() bool {
+	select {
+	case <-a.stopping:
+		return true
+	default:
+		return false
+	}
+}
+
+// changesSystem reports whether an operation changes the machines. Stopping
+// the agent does not interrupt those: a package manager killed halfway
+// leaves dpkg or rpm unfinished, also when the agent is stopped by the very
+// upgrade of its own package.
+func changesSystem(kind string) bool {
+	switch kind {
+	case ha.CmdUpgrade, ha.CmdUpgradePackages, ha.CmdUpgradeContainers, ha.CmdUpgradeAll,
+		ha.CmdUpgradeContainer, ha.CmdRestartContainer, ha.CmdReboot, ha.CmdRestore:
+		return true
+	}
+	return false
+}
+
+// markOperation creates or removes the operation marker.
+func (a *Agent) markOperation(running bool) {
+	if a.marker == "" {
+		return
+	}
+	var err error
+	if running {
+		err = os.WriteFile(a.marker, nil, 0o600)
+	} else if err = os.Remove(a.marker); errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if err != nil {
+		a.log.Warn("operation marker", "path", a.marker, "err", err)
+	}
+}
+
 func (a *Agent) execute(ctx context.Context, o op) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.log.Error("operation panicked", "op", o.kind, "device", o.device, "panic", r)
 		}
 	}()
+	if changesSystem(o.kind) {
+		// Its commands keep their own timeouts.
+		ctx = context.WithoutCancel(ctx)
+		a.markOperation(true)
+		defer a.markOperation(false)
+	}
 	if o.kind == "sync" {
 		a.syncGuests(ctx)
 		return
@@ -377,7 +460,7 @@ func (a *Agent) execute(ctx context.Context, o op) {
 		a.check(ctx, d)
 	case ha.CmdUpgrade, ha.CmdUpgradePackages, ha.CmdUpgradeContainers:
 		needsReboot := a.upgrade(ctx, d, o.kind, o.trigger, false)
-		if needsReboot && d.Host && a.cfg.Upgrade.RebootHost {
+		if needsReboot && d.Host && a.cfg.Upgrade.RebootHost && !a.isStopping() {
 			a.rebootHost(ctx, o.trigger)
 		}
 	case ha.CmdReboot:

@@ -53,8 +53,21 @@ The packages install:
 | `/usr/lib/systemd/system/linux-ha-agent.service` | systemd unit, not started until you enable it |
 | `/usr/share/doc/linux-ha-agent/` | README, example configuration, Mosquitto ACL |
 
-Upgrading the package restarts a running agent. Removing it stops the
-service; `apt purge` also removes the configuration.
+Upgrading the package restarts a running agent. When the agent upgraded
+itself, from Home Assistant or on its schedule, the restart waits until the
+package manager and the rest of that upgrade (guests included) are done.
+Stopping the agent never interrupts a running upgrade, restart or restore:
+it finishes that machine first (up to an hour, `TimeoutStopSec`), then exits.
+Removing the package stops the service; `apt purge` also removes the
+configuration.
+
+Before 0.5.2, an agent that upgraded its own package was restarted in the
+middle of it and left dpkg unfinished: later upgrades then fail with
+`dpkg was interrupted, you must manually run 'dpkg --configure -a'`. Run
+`sudo dpkg --configure -a` once. The 0.5.2 package keeps such an agent's own
+package upgrade from being interrupted, but an older agent does not tell it
+when the rest of an operation is done: upgrade it to 0.5.2 with the host's
+*Upgrade* button (or `apt`), not *Upgrade host and guests*.
 
 ## Install script
 

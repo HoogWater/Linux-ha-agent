@@ -9,9 +9,16 @@ ExecStartPre=/usr/bin/linux-ha-agent -config /etc/linux-ha-agent/config.yaml -ch
 ExecStart=/usr/bin/linux-ha-agent -config /etc/linux-ha-agent/config.yaml
 Restart=on-failure
 RestartSec=10
-# If the agent is stopped or restarted (for example by the very upgrade it is
-# running), let a running package manager finish instead of killing it.
+# If the agent is stopped or restarted while it upgrades, restarts or
+# restores a machine, it finishes that machine first: a package manager
+# killed halfway leaves dpkg or rpm unfinished. Give it the time, and never
+# kill the package manager along with it.
 KillMode=process
+TimeoutStopSec=1h
+# Holds the marker of a running operation, which the package's postinstall
+# script waits for before restarting an agent that upgraded itself.
+RuntimeDirectory=linux-ha-agent
+RuntimeDirectoryMode=0700
 StateDirectory=linux-ha-agent
 StateDirectoryMode=0700
 ConfigurationDirectory=linux-ha-agent

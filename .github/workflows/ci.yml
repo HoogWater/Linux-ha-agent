@@ -159,6 +159,61 @@ jobs:
           FORMAT: ${{ matrix.format }}
         run: docker run --rm -v "$PWD:/src:ro" -e FORMAT "$IMAGE" sh /src/tests/packages/install-test.sh
 
+  self-upgrade:
+    # The agent upgrades its own package and restarts into the new version,
+    # on the runner itself: it needs systemd. "release" is the published
+    # agent, whose package manager the old postinstall script interrupted.
+    name: Self-upgrade from ${{ matrix.from }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        from: [release, this commit]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q mosquitto mosquitto-clients dpkg-dev
+
+      - name: Build the packages
+        env:
+          FROM: ${{ matrix.from }}
+        run: |
+          # Versions above any release, so apt takes the new one.
+          make packages GOARCH=amd64 VERSION=v99.0.0
+          if [ "$FROM" = "this commit" ]; then
+            make packages GOARCH=amd64 VERSION=v98.0.0
+          fi
+
+      - name: Download the latest release
+        if: matrix.from == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download --repo "$GITHUB_REPOSITORY" --pattern '*_amd64.deb' --dir release
+
+      - name: Upgrade itself
+        env:
+          FROM: ${{ matrix.from }}
+        run: |
+          if [ "$FROM" = release ]; then
+            old=$(ls release/*_amd64.deb)
+          else
+            old=dist/linux-ha-agent_98.0.0-1_amd64.deb
+          fi
+          sudo OLD_DEB="$PWD/$old" NEW_DEB="$PWD/dist/linux-ha-agent_99.0.0-1_amd64.deb" \
+            sh tests/packages/self-upgrade-test.sh
+
   repository:
     name: Package repository on ${{ matrix.image }}
     runs-on: ubuntu-24.04
