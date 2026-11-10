@@ -228,7 +228,9 @@ func (a *Agent) upgrade(ctx context.Context, d *Device, action, trigger string, 
 		a.mu.Unlock()
 		a.saveState()
 		log.Info("upgrade finished", "success", report.Success, "changed", report.Changed)
-		a.check(ctx, d)
+		if !a.isStopping() {
+			a.check(ctx, d)
+		}
 	}()
 
 	opCtx, cancel := a.withTimeout(ctx)
@@ -374,12 +376,13 @@ func (a *Agent) upgradeAll(ctx context.Context, trigger string) {
 		if d.Host || !a.upgradable(d) {
 			continue
 		}
-		if ctx.Err() != nil {
+		if a.isStopping() {
+			a.log.Info("agent stopping, remaining guests are not upgraded")
 			return
 		}
 		a.upgrade(ctx, d, ha.CmdUpgrade, trigger, true)
 	}
-	if hostReboot && a.cfg.Upgrade.RebootHost {
+	if hostReboot && a.cfg.Upgrade.RebootHost && !a.isStopping() {
 		a.rebootHost(ctx, trigger)
 	}
 }

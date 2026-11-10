@@ -70,6 +70,10 @@ in
         Restart = "on-failure";
         RestartSec = 10;
         KillMode = "process";
+        # A stopped agent finishes the upgrade, restart or restore it runs.
+        TimeoutStopSec = "1h";
+        RuntimeDirectory = "linux-ha-agent";
+        RuntimeDirectoryMode = "0700";
         StateDirectory = "linux-ha-agent";
         StateDirectoryMode = "0700";
       };

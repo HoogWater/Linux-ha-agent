@@ -105,6 +105,10 @@ func run() error {
 		Version:   version,
 		Logger:    log,
 	}
+	// systemd sets RUNTIME_DIRECTORY from the unit's RuntimeDirectory=.
+	if dir := os.Getenv("RUNTIME_DIRECTORY"); dir != "" && !*once {
+		opts.OperationMarker = filepath.Join(dir, "operation")
+	}
 	if *once {
 		return runOnce(ctx, opts)
 	}
