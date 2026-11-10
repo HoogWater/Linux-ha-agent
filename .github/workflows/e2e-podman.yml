@@ -86,8 +86,8 @@ jobs:
         run: |
           sudo journalctl -u linux-ha-agent --no-pager | tee agent.log | tail -200 || true
           sudo /usr/bin/podman ps -a || true
-          sudo runuser -u "$E2E_PODMAN_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$E2E_PODMAN_USER")" \
-            /usr/bin/podman ps -a || true
+          sudo runuser -u "$E2E_PODMAN_USER" -- env -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_CACHE_HOME -u XDG_STATE_HOME \
+            XDG_RUNTIME_DIR="/run/user/$(id -u "$E2E_PODMAN_USER")" /usr/bin/podman ps -a || true
 
       - name: Upload logs
         if: always()

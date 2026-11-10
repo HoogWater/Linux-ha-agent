@@ -17,6 +17,12 @@ REGISTRY="mirror.gcr.io/library"
 PODMAN="${E2E_PODMAN_PATH:-/usr/bin/podman}"
 USER_NAME="${E2E_PODMAN_USER:-e2epod}"
 
+# GitHub's runner sets XDG_CONFIG_HOME for its own user in /etc/environment,
+# which PAM hands to every session, including the test user's systemd
+# manager: its Quadlet generator and podman would look in the runner's home.
+# Hosts normally have no such entries.
+sed -i -E '/^(export )?XDG_(CONFIG|DATA|CACHE|STATE)_HOME=/d' /etc/environment
+
 useradd --create-home --shell /bin/bash "$USER_NAME"
 # Rootless podman needs subordinate IDs; useradd adds them on most systems.
 grep -q "^${USER_NAME}:" /etc/subuid || usermod --add-subuids 200000-265535 "$USER_NAME"
@@ -30,9 +36,13 @@ for _ in $(seq 60); do
 done
 [ -S "/run/user/${uid}/bus" ]
 
-# as_user runs a command as the test user, from its home directory.
+# as_user runs a command as the test user, from its home directory. runuser
+# resets HOME but keeps the rest of the environment, and podman prefers the
+# XDG base directories over HOME: GitHub's runner sets XDG_CONFIG_HOME to the
+# runner user's home in /etc/environment, which sudo loads.
 as_user() {
   (cd "/home/${USER_NAME}" && runuser -u "$USER_NAME" -- env \
+    -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_CACHE_HOME -u XDG_STATE_HOME \
     XDG_RUNTIME_DIR="/run/user/${uid}" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" "$@")
 }
@@ -67,8 +77,8 @@ services:
     command: [sleep, infinity]
     restart: unless-stopped
 YAML
-(cd "/home/${USER_NAME}/app" && runuser -u "$USER_NAME" -- env XDG_RUNTIME_DIR="/run/user/${uid}" \
-  podman-compose --podman-path "$PODMAN" up -d)
+# shellcheck disable=SC2016 # expanded by the inner shell
+as_user sh -c 'cd app && exec podman-compose --podman-path "$1" up -d' sh "$PODMAN"
 
 # A Quadlet that podman auto-update may update and restart.
 as_user mkdir -p "/home/${USER_NAME}/.config/containers/systemd"

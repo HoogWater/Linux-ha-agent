@@ -31,7 +31,15 @@ func podman(t *testing.T, as string, args ...string) string {
 			t.Fatal(err)
 		}
 		cmd = exec.Command("runuser", append([]string{"-u", as, "--", podmanPath}, args...)...)
-		cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR=/run/user/"+u.Uid)
+		// runuser keeps the environment apart from HOME, and podman prefers
+		// the XDG directories over HOME: drop the ones of the calling user
+		// (GitHub's runner sets XDG_CONFIG_HOME in /etc/environment).
+		cmd.Env = []string{"XDG_RUNTIME_DIR=/run/user/" + u.Uid}
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "XDG_") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
 		cmd.Dir = u.HomeDir
 	}
 	out, err := cmd.CombinedOutput()
@@ -65,7 +73,7 @@ func TestPodmanHost(t *testing.T) {
 		c, _ := ctrs()[key].(map[string]any)
 		return c
 	}
-	upToDate := func(key string) bool {
+	current := func(key string) bool {
 		u, _ := ctr(key)["update"].(map[string]any)
 		return u != nil && u["installed_version"] == u["latest_version"]
 	}
@@ -107,7 +115,7 @@ func TestPodmanHost(t *testing.T) {
 		}
 		for _, key := range podmanCtrs {
 			c := ctr(key)
-			if c["running"] != true || upToDate(key) {
+			if c["running"] != true || current(key) {
 				t.Errorf("%s should run and have a newer image: %v", key, c)
 			}
 		}
@@ -129,7 +137,7 @@ func TestPodmanHost(t *testing.T) {
 		if after := podman(t, podmanUser, "inspect", "--format", "{{.Image}}", sleeper(t)); after == before {
 			t.Error("container was not recreated on the newer image")
 		}
-		eventually(t, 5*time.Minute, "compose container up to date", func() bool { return upToDate(composeKey) })
+		eventually(t, 5*time.Minute, "compose container up to date", func() bool { return current(composeKey) })
 	})
 
 	t.Run("restart a container", func(t *testing.T) {
@@ -165,7 +173,7 @@ func TestPodmanHost(t *testing.T) {
 			t.Errorf("dangling images left: %s", out)
 		}
 		eventually(t, 5*time.Minute, "all containers up to date", func() bool {
-			return upToDate(composeKey) && upToDate(quadletKey) && ctr(quadletKey)["running"] == true
+			return current(composeKey) && current(quadletKey) && ctr(quadletKey)["running"] == true
 		})
 	})
 

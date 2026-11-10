@@ -1,3 +1,4 @@
+---
 # Agent configuration used by the podman end-to-end workflow: the host's
 # rootless podman of the test user, with another podman first in PATH.
 mqtt:
