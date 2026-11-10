@@ -277,7 +277,11 @@ type composeTool struct {
 func (e *Engine) compose(ctx context.Context) composeTool {
 	if e.Name == "podman" {
 		res, err := e.r.Run(ctx, e.cmd("compose", "version"))
-		if (err != nil || res.ExitCode != 0) && runner.Has(ctx, e.r, "podman-compose") {
+		works := err == nil && res.ExitCode == 0
+		wraps := strings.Contains(res.Stdout+res.Stderr, "podman-compose")
+		// podman-compose runs the podman in PATH, so a configured podman is
+		// passed to it directly instead of through `podman compose`.
+		if (!works || (wraps && e.bin != "podman")) && runner.Has(ctx, e.r, "podman-compose") {
 			base := append(append([]string(nil), e.prefix...), "podman-compose")
 			if e.bin != "podman" {
 				base = append(base, "--podman-path", e.bin)
@@ -285,7 +289,7 @@ func (e *Engine) compose(ctx context.Context) composeTool {
 			return composeTool{base: base, env: e.env, podmanCompose: true}
 		}
 		// `podman compose` may itself delegate to podman-compose.
-		return composeTool{base: e.cmd("compose").Args, env: e.env, podmanCompose: strings.Contains(res.Stdout+res.Stderr, "podman-compose")}
+		return composeTool{base: e.cmd("compose").Args, env: e.env, podmanCompose: wraps}
 	}
 	return composeTool{base: e.cmd("compose").Args, env: e.env}
 }
@@ -326,6 +330,15 @@ func (c composeTool) up(p Project, services ...string) runner.Cmd {
 	return c.command(p, append(args, services...)...)
 }
 
+// recreate recreates the containers of services (all without services).
+func (c composeTool) recreate(p Project, services ...string) runner.Cmd {
+	args := []string{"up", "-d", "--force-recreate"}
+	if len(services) > 0 {
+		args = append(args, "--no-deps")
+	}
+	return c.command(p, append(args, services...)...)
+}
+
 // UpgradeProject pulls newer images for a compose project and recreates the
 // containers whose image changed. It reports whether anything changed.
 func (e *Engine) UpgradeProject(ctx context.Context, p Project) (bool, error) {
@@ -349,11 +362,73 @@ func (e *Engine) upgradeCompose(ctx context.Context, p Project, services ...stri
 	if _, err := runner.Check(ctx, e.r, tool.up(p, services...)); err != nil {
 		return false, err
 	}
+	// podman-compose only recreates containers whose compose configuration
+	// changed, so containers still on an image older than the one just
+	// pulled are recreated explicitly.
+	if tool.podmanCompose {
+		stale, all, err := e.staleServices(ctx, p.Name, services)
+		if err != nil {
+			return false, err
+		}
+		if all || len(stale) > 0 {
+			if _, err := runner.Check(ctx, e.r, tool.recreate(p, stale...)); err != nil {
+				return false, err
+			}
+		}
+	}
 	after, err := e.projectImages(ctx, p.Name)
 	if err != nil {
 		return false, err
 	}
 	return !maps.Equal(before, after), nil
+}
+
+// staleServices returns the services of a project (limited to services, if
+// given) with a container that runs another image than its image reference
+// now points to. all is set when such a container has no service label, so
+// only recreating the whole project helps.
+func (e *Engine) staleServices(ctx context.Context, project string, services []string) (stale []string, all bool, err error) {
+	cs, err := e.Containers(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	var mine []Container
+	refs := map[string]bool{}
+	for _, c := range cs {
+		if c.Project == project && (len(services) == 0 || slices.Contains(services, c.Service)) {
+			mine = append(mine, c)
+			refs[c.Image] = true
+		}
+	}
+	if len(mine) == 0 {
+		return nil, false, nil
+	}
+	list := slices.Sorted(maps.Keys(refs))
+	res, err := runner.Check(ctx, e.r, e.cmd(append([]string{"image", "inspect", "--format", "{{.Id}}"}, list...)...))
+	if err != nil {
+		return nil, false, err
+	}
+	ids := strings.Fields(res.Stdout)
+	if len(ids) != len(list) {
+		return nil, false, fmt.Errorf("image inspect returned %d IDs for %d images", len(ids), len(list))
+	}
+	current := map[string]string{}
+	for i, ref := range list {
+		current[ref] = normalizeID(ids[i])
+	}
+	for _, c := range mine {
+		if current[c.Image] == c.ImageID {
+			continue
+		}
+		if c.Service == "" {
+			return nil, true, nil
+		}
+		if !slices.Contains(stale, c.Service) {
+			stale = append(stale, c.Service)
+		}
+	}
+	slices.Sort(stale)
+	return stale, false, nil
 }
 
 // Restart restarts one container.
