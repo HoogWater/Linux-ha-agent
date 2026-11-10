@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,5 +63,24 @@ func TestWithEnvDoesNotMutate(t *testing.T) {
 	}
 	if derived.Env["A"] != "1" || derived.Env["B"] != "2" {
 		t.Fatalf("unexpected env %v", derived.Env)
+	}
+}
+
+// Programs are looked up in the PATH the command gets, not in the agent's
+// own (under sudo or on Synology DSM it lacks /usr/local/bin).
+func TestLocalUsesCommandPath(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "only-here")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\necho found\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+	res, err := Local{}.Run(context.Background(), Command("only-here").WithEnv("PATH", dir+":/usr/bin:/bin"))
+	if err != nil || res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "found" {
+		t.Fatalf("got %+v %v", res, err)
+	}
+	// Missing programs still exit with 127.
+	if res, _ := (Local{}).Run(context.Background(), Command("only-here")); res.ExitCode != 127 {
+		t.Fatalf("not in the default PATH: %+v", res)
 	}
 }

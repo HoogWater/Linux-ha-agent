@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -113,6 +115,20 @@ func Environment(cmd Cmd) map[string]string {
 	return env
 }
 
+// lookPath finds an executable in a PATH value.
+func lookPath(name, path string) (string, bool) {
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue // the current directory: never wanted for root
+		}
+		p := filepath.Join(dir, name)
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 // Local runs commands on the machine the agent runs on.
 type Local struct{}
 
@@ -121,8 +137,17 @@ func (Local) Run(ctx context.Context, cmd Cmd) (Result, error) {
 	if len(cmd.Args) == 0 {
 		return Result{}, errors.New("empty command")
 	}
-	c := exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
 	env := Environment(cmd)
+	// Find the program in the PATH it gets, not in the agent's own: that
+	// may lack directories such as /usr/local/bin (sudo's secure_path,
+	// Synology DSM, where Container Manager installs docker there).
+	name := cmd.Args[0]
+	if !strings.Contains(name, "/") {
+		if path, ok := lookPath(name, env["PATH"]); ok {
+			name = path
+		}
+	}
+	c := exec.CommandContext(ctx, name, cmd.Args[1:]...)
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
