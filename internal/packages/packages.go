@@ -1,5 +1,5 @@
 // Package packages checks for and installs operating system updates with the
-// native package manager of a target: apt, dnf or NixOS.
+// native package manager of a target: apt, dnf, NixOS or Synology DSM.
 package packages
 
 import (
@@ -71,6 +71,8 @@ func For(info osinfo.Info, r runner.Runner, opts Options) (Manager, error) {
 		return &Dnf{r: r}, nil
 	case osinfo.FamilyNixOS:
 		return &NixOS{r: r, flake: opts.NixFlake, gcOlderThan: opts.NixGCOlderThan}, nil
+	case osinfo.FamilyDSM:
+		return &DSM{r: r}, nil
 	default:
 		name := info.PrettyName
 		if name == "" {

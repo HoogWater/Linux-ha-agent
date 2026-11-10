@@ -1,4 +1,5 @@
-// Package osinfo detects the distribution of a target from /etc/os-release.
+// Package osinfo detects the distribution of a target from /etc/os-release,
+// or from /etc.defaults/VERSION on Synology DSM, which has no os-release.
 package osinfo
 
 import (
@@ -19,6 +20,7 @@ const (
 	FamilyDebian  Family = "debian"
 	FamilyRHEL    Family = "rhel"
 	FamilyNixOS   Family = "nixos"
+	FamilyDSM     Family = "dsm"
 	FamilyUnknown Family = "unknown"
 )
 
@@ -32,17 +34,41 @@ type Info struct {
 	Family     Family
 }
 
-// Detect reads /etc/os-release on the target.
+// dsmVersionFile describes the installed DSM version on Synology systems.
+const dsmVersionFile = "/etc.defaults/VERSION"
+
+// Detect reads /etc/os-release on the target, or the DSM version file on
+// Synology systems.
 func Detect(ctx context.Context, r runner.Runner) (Info, error) {
 	res, err := runner.Check(ctx, r, runner.Command("cat", "/etc/os-release"))
 	if err != nil {
+		if dsm, dsmErr := runner.Check(ctx, r, runner.Command("cat", dsmVersionFile)); dsmErr == nil {
+			return ParseDSM(dsm.Stdout), nil
+		}
 		return Info{Family: FamilyUnknown}, fmt.Errorf("reading /etc/os-release: %w", err)
 	}
 	return Parse(res.Stdout), nil
 }
 
-// Parse parses the contents of an os-release file.
-func Parse(content string) Info {
+// ParseDSM parses Synology's /etc.defaults/VERSION.
+func ParseDSM(content string) Info {
+	values := parseValues(content)
+	version := values["productversion"]
+	if version == "" {
+		version = strings.Trim(values["majorversion"]+"."+values["minorversion"], ".")
+	}
+	pretty := strings.TrimSpace("DSM " + version)
+	if build := values["buildnumber"]; build != "" {
+		pretty += "-" + build
+	}
+	if fix := values["smallfixnumber"]; fix != "" && fix != "0" {
+		pretty += " Update " + fix
+	}
+	return Info{ID: "dsm", Name: "DSM", Version: version, PrettyName: pretty, Family: FamilyDSM}
+}
+
+// parseValues reads KEY=value lines with optionally quoted values.
+func parseValues(content string) map[string]string {
 	values := map[string]string{}
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
@@ -60,6 +86,12 @@ func Parse(content string) Info {
 		}
 		values[key] = value
 	}
+	return values
+}
+
+// Parse parses the contents of an os-release file.
+func Parse(content string) Info {
+	values := parseValues(content)
 	info := Info{
 		ID:         strings.ToLower(values["ID"]),
 		IDLike:     strings.Fields(strings.ToLower(values["ID_LIKE"])),

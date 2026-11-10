@@ -69,3 +69,32 @@ func TestDetectError(t *testing.T) {
 		t.Fatalf("expected error and unknown family, got %+v %v", info, err)
 	}
 }
+
+// Synology DSM has no os-release; its version file is read instead.
+func TestDetectDSM(t *testing.T) {
+	const version = `majorversion="7"
+minorversion="4"
+major="7"
+minor="4"
+micro="1"
+buildphase="GM"
+buildnumber="90080"
+smallfixnumber="1"
+nano="1"
+base="90080"
+productversion="7.4.1"
+os_name="DSM"
+builddate="2026/10/02"
+buildtime="14:16:12"
+`
+	f := (&runner.Fake{}).
+		On("cat /etc/os-release", runner.Result{ExitCode: 1, Stderr: "cat: /etc/os-release: No such file or directory"}).
+		On("cat /etc.defaults/VERSION", runner.Result{Stdout: version})
+	info, err := Detect(context.Background(), f)
+	if err != nil || info.Family != FamilyDSM || info.ID != "dsm" || info.Version != "7.4.1" || info.PrettyName != "DSM 7.4.1-90080 Update 1" {
+		t.Fatalf("got %+v %v", info, err)
+	}
+	if info := ParseDSM("productversion=\"7.2.2\"\nbuildnumber=\"72806\"\nsmallfixnumber=\"0\"\n"); info.PrettyName != "DSM 7.2.2-72806" {
+		t.Fatalf("without update: %+v", info)
+	}
+}
