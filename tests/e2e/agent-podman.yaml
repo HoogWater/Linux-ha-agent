@@ -1,0 +1,27 @@
+---
+# Agent configuration used by the podman end-to-end workflow: the host's
+# rootless podman of the test user, with another podman first in PATH.
+mqtt:
+  url: tcp://127.0.0.1:1883
+  username: e2e_host
+  password_file: /etc/linux-ha-agent/mqtt-password
+host:
+  name: e2e-host
+incus:
+  enabled: "false"
+proxmox:
+  enabled: "false"
+containers:
+  podman:
+    path: /usr/bin/podman
+    user: e2epod
+checks:
+  interval: 1h
+upgrade:
+  cleanup: true
+  command_timeout: 30m
+permissions:
+  upgrade: true
+  reboot_host: false
+  restart_containers: true
+log_level: debug

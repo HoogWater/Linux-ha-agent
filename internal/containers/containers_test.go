@@ -50,6 +50,11 @@ func TestParseInspect(t *testing.T) {
 	if err != nil || !ps[0].AutoUpdate || ps[0].ImageID != "img4" || ps[0].Name != "jellyfin" {
 		t.Fatalf("unexpected %+v %v", ps, err)
 	}
+	pc, err := ParseInspect(`[{"Id":"eee","Name":"app_web_1","Image":"img5","Config":{"Image":"nginx",
+	  "Labels":{"com.docker.compose.project":"app","io.podman.compose.project":"app"}},"State":{"Status":"running"}}]`)
+	if err != nil || !pc[0].PodmanCompose || !Projects(pc)[0].PodmanCompose || cs[0].PodmanCompose {
+		t.Fatalf("podman-compose label: %+v %v", pc, err)
+	}
 	if _, err := ParseInspect("not json"); err == nil {
 		t.Fatal("expected error")
 	}
@@ -208,7 +213,7 @@ func TestPodmanComposeAsUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool := e.compose(context.Background())
+	tool := e.compose(context.Background(), Project{})
 	p := Project{Name: "app", WorkingDir: "/home/mark/app"}
 	pull := tool.pull(p)
 	want := `sh -c cd "$1" && shift && exec "$@" sh /home/mark/app runuser -u mark -- podman-compose --podman-path /usr/local/bin/podman -p app pull`
@@ -251,7 +256,7 @@ func TestPodmanCompose(t *testing.T) {
 	f := (&runner.Fake{}).
 		On("podman compose version", runner.Result{ExitCode: 125}).
 		On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
-	tool := NewEngine("podman", f).compose(context.Background())
+	tool := NewEngine("podman", f).compose(context.Background(), Project{})
 	if strings.Join(tool.base, " ") != "podman-compose" || !tool.podmanCompose {
 		t.Fatalf("got %+v", tool)
 	}
@@ -266,8 +271,65 @@ func TestPodmanCompose(t *testing.T) {
 	}
 
 	wrapped := (&runner.Fake{}).On("podman compose version", runner.Result{Stdout: ">>>> Executing external compose provider \"/usr/bin/podman-compose\"\npodman-compose version 1.5.0\n"})
-	if tool := NewEngine("podman", wrapped).compose(context.Background()); !tool.podmanCompose || tool.base[0] != "podman" {
+	if tool := NewEngine("podman", wrapped).compose(context.Background(), Project{}); !tool.podmanCompose || tool.base[0] != "podman" {
 		t.Errorf("podman compose wrapping podman-compose: %+v", tool)
+	}
+
+	// A podman-compose project is not handed to docker-compose, which
+	// `podman compose` prefers when both are installed.
+	docker := (&runner.Fake{}).
+		On("podman compose version", runner.Result{Stdout: ">>>> Executing external compose provider \"/usr/libexec/docker/cli-plugins/docker-compose\"\nDocker Compose version v2.40.3\n"}).
+		On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
+	if tool := NewEngine("podman", docker).compose(context.Background(), Project{PodmanCompose: true}); strings.Join(tool.base, " ") != "podman-compose" || !tool.podmanCompose {
+		t.Errorf("podman-compose project with docker-compose as provider: %+v", tool)
+	}
+	if tool := NewEngine("podman", docker).compose(context.Background(), Project{}); tool.base[0] != "podman" || tool.podmanCompose {
+		t.Errorf("docker compose project: %+v", tool)
+	}
+
+	// With a configured podman, podman-compose is told which one to use:
+	// through `podman compose` it would run the podman in PATH.
+	wrapped.On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
+	e, _ := Podman{Path: "/usr/bin/podman"}.Engine(context.Background(), wrapped)
+	if tool := e.compose(context.Background(), Project{}); strings.Join(tool.base, " ") != "podman-compose --podman-path /usr/bin/podman" {
+		t.Errorf("configured podman with podman-compose: %+v", tool)
+	}
+}
+
+// podman-compose does not recreate a container whose image was pulled anew,
+// so the agent recreates the services still on an older image.
+func TestPodmanComposeRecreatesStaleServices(t *testing.T) {
+	webImage := "img1" // what web runs; busybox:latest points to img2 after the pull
+	inspect := func(runner.Cmd) runner.Result {
+		return runner.Result{Stdout: fmt.Sprintf(`[
+		 {"Id":"aaa","Name":"app_web_1","Image":%q,"Config":{"Image":"busybox:latest",
+		  "Labels":{"com.docker.compose.project":"app","com.docker.compose.service":"web"}},"State":{"Status":"running"}},
+		 {"Id":"bbb","Name":"app_db_1","Image":"img3","Config":{"Image":"postgres:17",
+		  "Labels":{"com.docker.compose.project":"app","com.docker.compose.service":"db"}},"State":{"Status":"running"}}]`, webImage)}
+	}
+	f := (&runner.Fake{}).
+		On("podman compose version", runner.Result{ExitCode: 125}).
+		On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{}).
+		On("podman ps -a -q --no-trunc", runner.Result{Stdout: "aaa\nbbb\n"}).
+		OnFunc("podman container inspect aaa bbb", inspect).
+		On("podman image inspect --format {{.Id}} busybox:latest postgres:17", runner.Result{Stdout: "sha256:img2\nimg3\n"}).
+		On("podman image inspect --format {{.Id}} busybox:latest", runner.Result{Stdout: "sha256:img2\n"}).
+		On(" pull", runner.Result{}).
+		OnFunc("up -d --force-recreate --no-deps web", func(runner.Cmd) runner.Result { webImage = "img2"; return runner.Result{} }).
+		On("up -d", runner.Result{})
+	changed, err := NewEngine("podman", f).UpgradeProject(context.Background(), Project{Name: "app"})
+	if err != nil || !changed {
+		t.Fatalf("expected a change, got %v %v (calls %v)", changed, err, f.Calls)
+	}
+	if !f.Ran("podman-compose -p app up -d --force-recreate --no-deps web") {
+		t.Fatalf("web not recreated: %v", f.Calls)
+	}
+
+	// Nothing is recreated when every container runs its current image.
+	f.Calls = nil
+	changed, err = NewEngine("podman", f).UpgradeService(context.Background(), Project{Name: "app"}, "web")
+	if err != nil || changed || f.Ran("--force-recreate") {
+		t.Fatalf("up-to-date service: changed=%v err=%v calls=%v", changed, err, f.Calls)
 	}
 }
 
