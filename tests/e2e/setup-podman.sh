@@ -17,11 +17,12 @@ REGISTRY="mirror.gcr.io/library"
 PODMAN="${E2E_PODMAN_PATH:-/usr/bin/podman}"
 USER_NAME="${E2E_PODMAN_USER:-e2epod}"
 
-# GitHub's runner sets XDG_CONFIG_HOME for its own user in /etc/environment,
-# which PAM hands to every session, including the test user's systemd
-# manager: its Quadlet generator and podman would look in the runner's home.
-# Hosts normally have no such entries.
-sed -i -E '/^(export )?XDG_(CONFIG|DATA|CACHE|STATE)_HOME=/d' /etc/environment
+# GitHub's runner sets XDG_CONFIG_HOME and XDG_RUNTIME_DIR for its own user in
+# /etc/environment, which PAM hands to every session, including the test
+# user's systemd manager: its Quadlet generator would look in the runner's
+# home and podman in the Quadlet units would use the runner's runtime
+# directory. Hosts normally have no such entries.
+sed -i -E '/^(export )?XDG_[A-Z_]+=/d' /etc/environment
 
 useradd --create-home --shell /bin/bash "$USER_NAME"
 # Rootless podman needs subordinate IDs; useradd adds them on most systems.
