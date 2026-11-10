@@ -1,0 +1,114 @@
+# Shared by the package scripts. DSM 7 runs them as the package user.
+# shellcheck shell=sh
+PKG=LinuxHAAgent
+VAR=${SYNOPKG_PKGVAR:-/var/packages/$PKG/var}
+BIN=${SYNOPKG_PKGDEST:-/var/packages/$PKG/target}/bin
+# Wizard settings (key=value, one per line; the MQTT password is kept apart).
+SETTINGS=$VAR/settings
+PASSWORD_FILE=$VAR/mqtt-password
+CONFIG=$VAR/config.yaml
+ROOTDIR=$VAR/root
+
+# The command of the Task Scheduler boot-up task that runs the agent as root.
+# shellcheck disable=SC2016,SC2034 # printed literally; used by start-stop-status
+ROOT_TASK='T=$(readlink -f /var/packages/LinuxHAAgent/target) && chown -R root:root "$T" && /bin/sh "$T/bin/root-task.sh"'
+
+# msg shows a message in DSM (for failed steps) and in the script's output.
+msg() {
+	[ -n "$SYNOPKG_TEMP_LOGFILE" ] && echo "$*" >>"$SYNOPKG_TEMP_LOGFILE"
+	echo "$*" >&2
+}
+
+setting() { sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | head -n 1; }
+
+# choose prints the wizard value when the wizard set it (even to empty), and
+# the saved setting otherwise (installs without wizard, e.g. synopkg install).
+choose() {
+	if eval "[ -n \"\${$1+set}\" ]"; then
+		eval "printf '%s' \"\$$1\""
+	else
+		setting "$2"
+	fi
+}
+
+yaml_str() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+
+yaml_bool() {
+	case $1 in
+	true | yes | 1) echo true ;;
+	*) echo false ;;
+	esac
+}
+
+# apply_wizard saves the wizard's settings and writes config.yaml from them.
+apply_wizard() {
+	url=$(choose wizard_mqtt_url mqtt_url)
+	user=$(choose wizard_mqtt_username mqtt_username)
+	name=$(choose wizard_host_name host_name)
+	upgrade=$(yaml_bool "$(choose wizard_perm_upgrade perm_upgrade)")
+	restart=$(yaml_bool "$(choose wizard_perm_restart_containers perm_restart_containers)")
+	entities=$(choose wizard_container_entities container_entities)
+	[ -n "$entities" ] || entities=true
+	entities=$(yaml_bool "$entities")
+	if [ -z "$url" ]; then
+		msg "No MQTT broker set: install the package from Package Center to run its wizard."
+		return 0
+	fi
+	for v in "$url" "$user" "$name"; do
+		case $v in *"
+"*) msg "Settings must not contain line breaks." && return 1 ;; esac
+	done
+
+	umask 077
+	if [ -n "${wizard_mqtt_password:-}" ]; then
+		printf '%s' "$wizard_mqtt_password" >"$PASSWORD_FILE" || return 1
+	fi
+	{
+		echo "mqtt_url=$url"
+		echo "mqtt_username=$user"
+		echo "host_name=$name"
+		echo "perm_upgrade=$upgrade"
+		echo "perm_restart_containers=$restart"
+		echo "container_entities=$entities"
+	} >"$SETTINGS.new" && mv "$SETTINGS.new" "$SETTINGS" || return 1
+
+	{
+		echo "# Written by the Linux HA Agent package from its wizard settings. Changes"
+		echo "# here are replaced when the package is upgraded or installed again."
+		echo "mqtt:"
+		echo "  url: $(yaml_str "$url")"
+		if [ -n "$user" ]; then
+			echo "  username: $(yaml_str "$user")"
+			[ -s "$PASSWORD_FILE" ] && echo "  password_file: $PASSWORD_FILE"
+		fi
+		if [ -n "$name" ]; then
+			echo "host:"
+			echo "  name: $(yaml_str "$name")"
+		fi
+		echo "checks:"
+		echo "  container_entities: $entities"
+		echo "upgrade:"
+		echo "  reboot_host: false"
+		echo "permissions:"
+		echo "  upgrade: $upgrade"
+		echo "  reboot_host: false"
+		echo "  restart_containers: $restart"
+	} >"$CONFIG.new" || return 1
+	if ! out=$("$BIN/linux-ha-agent" -config "$CONFIG.new" -check-config 2>&1); then
+		rm -f "$CONFIG.new"
+		msg "The settings are not valid: $out"
+		return 1
+	fi
+	mv "$CONFIG.new" "$CONFIG"
+}
+
+root_task_alive() { [ -n "$(find "$ROOTDIR/alive" -mmin -1 2>/dev/null)" ]; }
+
+# agent_busy: the root task is waiting for the agent to finish an operation
+# before it restarts it (after an upgrade or new settings).
+agent_busy() { [ -e "$ROOTDIR/stopping" ]; }
+
+agent_running() {
+	pid=$(cat "$ROOTDIR/agent.pid" 2>/dev/null) || return 1
+	grep -q linux-ha-agent "/proc/$pid/cmdline" 2>/dev/null
+}

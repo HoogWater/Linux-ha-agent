@@ -1,0 +1,47 @@
+#!/bin/sh
+# Start and Stop in Package Center. The agent itself runs as root from a Task
+# Scheduler boot-up task (see root-task.sh); this only asks it to start or stop.
+# shellcheck source-path=SCRIPTDIR source=common disable=SC1091
+. "$(dirname "$0")/common"
+
+case $1 in
+start)
+	touch "$VAR/run-requested"
+	if [ ! -s "$CONFIG" ]; then
+		msg "Linux HA Agent has no settings yet. Install the package again from Package Center to run its wizard."
+		exit 1
+	fi
+	if ! root_task_alive; then
+		msg "Linux HA Agent runs as root from a Task Scheduler task, which is not running. In Control Panel > Task Scheduler, create a Triggered Task > User-defined script, user root, event Boot-up, with this command, then run it once and start the package again: $ROOT_TASK"
+		exit 1
+	fi
+	for _ in $(seq 20); do
+		agent_running && exit 0
+		# Restarting: the agent finishes a running operation first.
+		agent_busy && exit 0
+		sleep 1
+	done
+	msg "The agent did not start; see the package log ($ROOTDIR/agent.log)."
+	exit 1
+	;;
+stop)
+	rm -f "$VAR/run-requested"
+	for _ in $(seq 40); do
+		agent_running || exit 0
+		sleep 1
+	done
+	exit 0
+	;;
+status)
+	agent_running && exit 0
+	[ -e "$VAR/run-requested" ] && agent_busy && exit 0
+	exit 3
+	;;
+log)
+	echo "$ROOTDIR/agent.log"
+	exit 0
+	;;
+*)
+	exit 1
+	;;
+esac

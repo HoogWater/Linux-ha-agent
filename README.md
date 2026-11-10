@@ -124,6 +124,7 @@ host. The full list is in [docs/entities.md](docs/entities.md).
 | Ubuntu, Debian and derivatives | apt | security updates detected from the `-security` pockets |
 | Fedora, RHEL, Rocky, Alma, CentOS Stream | dnf (dnf4 and dnf5) | security updates from advisories |
 | NixOS | `nixos-rebuild` | channels (`--upgrade`) or a flake (`--refresh`); garbage collection as cleanup |
+| Synology DSM 7 | Package Center (`synopkg`) | installed as a package with a setup wizard; DSM updates are reported, not installed; see [docs/synology.md](docs/synology.md) |
 | Others (e.g. Alpine) | – | listed with OS and containers; packages are skipped, not failed |
 
 Virtualisation platforms (both can be used on one machine; detected automatically):

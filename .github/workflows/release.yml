@@ -69,6 +69,8 @@ jobs:
           (umask 077 && printf '%s\n' "$REPO_SIGNING_KEY" >"$NFPM_RPM_KEY_FILE")
           make packages GOARCH=amd64 VERSION="$VERSION"
           make packages GOARCH=arm64 VERSION="$VERSION"
+          make spk GOARCH=amd64 VERSION="$VERSION"
+          make spk GOARCH=arm64 VERSION="$VERSION"
           rm "$NFPM_RPM_KEY_FILE"
           cp config.example.yaml packaging/systemd/linux-ha-agent.service packaging/install.sh dist/
           cd dist && sha256sum -- * > SHA256SUMS
@@ -92,6 +94,7 @@ jobs:
             dist/linux-ha-agent-linux-*
             dist/*.deb
             dist/*.rpm
+            dist/*.spk
 
       - name: Publish release
         env:

@@ -30,7 +30,7 @@ repos:
     rev: v2.4.3
     hooks:
       - id: codespell
-        args: [--ignore-words-list, "mosquitto,fpr"] # fpr: gpg --with-colons fingerprint records
+        args: [--ignore-words-list, "mosquitto,fpr,thirdparty"] # fpr: gpg --with-colons fingerprint records; thirdparty: a key of Synology package INFO files
         exclude: ^(LICENSE|go\.sum)$
 
   - repo: https://github.com/adrienverge/yamllint
