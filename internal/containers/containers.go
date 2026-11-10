@@ -21,6 +21,8 @@ const (
 	labelConfigFiles = "com.docker.compose.project.config_files"
 	labelService     = "com.docker.compose.service"
 	labelAutoUpdate  = "io.containers.autoupdate"
+	// labelPodmanCompose is only set by podman-compose.
+	labelPodmanCompose = "io.podman.compose.project"
 )
 
 // Engine is a container engine (docker or podman) on one target.
@@ -127,6 +129,8 @@ type Container struct {
 	WorkingDir  string
 	ConfigFiles []string
 	AutoUpdate  bool
+	// PodmanCompose is set when podman-compose created the container.
+	PodmanCompose bool
 }
 
 // Running reports whether the container runs.
@@ -181,16 +185,17 @@ func ParseInspect(out string) ([]Container, error) {
 		}
 		autoUpdate := labels[labelAutoUpdate]
 		containers = append(containers, Container{
-			ID:          c.ID,
-			Name:        strings.TrimPrefix(c.Name, "/"),
-			Image:       c.Config.Image,
-			ImageID:     normalizeID(c.Image),
-			State:       strings.ToLower(c.State.Status),
-			Project:     labels[labelProject],
-			Service:     labels[labelService],
-			WorkingDir:  labels[labelWorkingDir],
-			ConfigFiles: files,
-			AutoUpdate:  autoUpdate == "registry" || autoUpdate == "local",
+			ID:            c.ID,
+			Name:          strings.TrimPrefix(c.Name, "/"),
+			Image:         c.Config.Image,
+			ImageID:       normalizeID(c.Image),
+			State:         strings.ToLower(c.State.Status),
+			Project:       labels[labelProject],
+			Service:       labels[labelService],
+			WorkingDir:    labels[labelWorkingDir],
+			ConfigFiles:   files,
+			AutoUpdate:    autoUpdate == "registry" || autoUpdate == "local",
+			PodmanCompose: labels[labelPodmanCompose] != "",
 		})
 	}
 	return containers, nil
@@ -207,6 +212,8 @@ type Project struct {
 	ConfigFiles []string `json:"config_files,omitempty"`
 	Containers  int      `json:"containers"`
 	Running     int      `json:"running"`
+	// PodmanCompose is set when podman-compose created the project.
+	PodmanCompose bool `json:"-"`
 }
 
 // Projects groups containers into compose projects.
@@ -218,7 +225,7 @@ func Projects(containers []Container) []Project {
 		}
 		p := byName[c.Project]
 		if p == nil {
-			p = &Project{Name: c.Project, WorkingDir: c.WorkingDir, ConfigFiles: c.ConfigFiles}
+			p = &Project{Name: c.Project, WorkingDir: c.WorkingDir, ConfigFiles: c.ConfigFiles, PodmanCompose: c.PodmanCompose}
 			byName[c.Project] = p
 		}
 		p.Containers++
@@ -274,14 +281,19 @@ type composeTool struct {
 	podmanCompose bool
 }
 
-func (e *Engine) compose(ctx context.Context) composeTool {
+// compose returns the compose implementation for a project of the engine.
+func (e *Engine) compose(ctx context.Context, p Project) composeTool {
 	if e.Name == "podman" {
 		res, err := e.r.Run(ctx, e.cmd("compose", "version"))
 		works := err == nil && res.ExitCode == 0
 		wraps := strings.Contains(res.Stdout+res.Stderr, "podman-compose")
-		// podman-compose runs the podman in PATH, so a configured podman is
-		// passed to it directly instead of through `podman compose`.
-		if (!works || (wraps && e.bin != "podman")) && runner.Has(ctx, e.r, "podman-compose") {
+		// podman-compose is called directly: when `podman compose` does not
+		// work; when it would hand a podman-compose project to another
+		// provider (docker-compose names containers differently and needs
+		// the podman API socket); and with a configured podman, which
+		// podman-compose would not find through `podman compose`.
+		direct := !works || (p.PodmanCompose && !wraps) || (wraps && e.bin != "podman")
+		if direct && runner.Has(ctx, e.r, "podman-compose") {
 			base := append(append([]string(nil), e.prefix...), "podman-compose")
 			if e.bin != "podman" {
 				base = append(base, "--podman-path", e.bin)
@@ -355,7 +367,7 @@ func (e *Engine) upgradeCompose(ctx context.Context, p Project, services ...stri
 	if err != nil {
 		return false, err
 	}
-	tool := e.compose(ctx)
+	tool := e.compose(ctx, p)
 	if _, err := runner.Check(ctx, e.r, tool.pull(p, services...)); err != nil {
 		return false, err
 	}

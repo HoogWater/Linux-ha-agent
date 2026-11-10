@@ -173,7 +173,7 @@ func (a *Agent) upgradeContainer(ctx context.Context, d *Device, key, trigger st
 	case err != nil:
 		report.step("container", false, err, "")
 	case c.Project != "":
-		p := containers.Project{Name: c.Project, WorkingDir: c.WorkingDir, ConfigFiles: c.ConfigFiles}
+		p := containers.Project{Name: c.Project, WorkingDir: c.WorkingDir, ConfigFiles: c.ConfigFiles, PodmanCompose: c.PodmanCompose}
 		var changed bool
 		if c.Service == "" {
 			changed, err = e.UpgradeProject(ctx, p) // older compose without service labels

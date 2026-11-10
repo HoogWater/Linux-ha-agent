@@ -50,6 +50,11 @@ func TestParseInspect(t *testing.T) {
 	if err != nil || !ps[0].AutoUpdate || ps[0].ImageID != "img4" || ps[0].Name != "jellyfin" {
 		t.Fatalf("unexpected %+v %v", ps, err)
 	}
+	pc, err := ParseInspect(`[{"Id":"eee","Name":"app_web_1","Image":"img5","Config":{"Image":"nginx",
+	  "Labels":{"com.docker.compose.project":"app","io.podman.compose.project":"app"}},"State":{"Status":"running"}}]`)
+	if err != nil || !pc[0].PodmanCompose || !Projects(pc)[0].PodmanCompose || cs[0].PodmanCompose {
+		t.Fatalf("podman-compose label: %+v %v", pc, err)
+	}
 	if _, err := ParseInspect("not json"); err == nil {
 		t.Fatal("expected error")
 	}
@@ -208,7 +213,7 @@ func TestPodmanComposeAsUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool := e.compose(context.Background())
+	tool := e.compose(context.Background(), Project{})
 	p := Project{Name: "app", WorkingDir: "/home/mark/app"}
 	pull := tool.pull(p)
 	want := `sh -c cd "$1" && shift && exec "$@" sh /home/mark/app runuser -u mark -- podman-compose --podman-path /usr/local/bin/podman -p app pull`
@@ -251,7 +256,7 @@ func TestPodmanCompose(t *testing.T) {
 	f := (&runner.Fake{}).
 		On("podman compose version", runner.Result{ExitCode: 125}).
 		On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
-	tool := NewEngine("podman", f).compose(context.Background())
+	tool := NewEngine("podman", f).compose(context.Background(), Project{})
 	if strings.Join(tool.base, " ") != "podman-compose" || !tool.podmanCompose {
 		t.Fatalf("got %+v", tool)
 	}
@@ -266,15 +271,27 @@ func TestPodmanCompose(t *testing.T) {
 	}
 
 	wrapped := (&runner.Fake{}).On("podman compose version", runner.Result{Stdout: ">>>> Executing external compose provider \"/usr/bin/podman-compose\"\npodman-compose version 1.5.0\n"})
-	if tool := NewEngine("podman", wrapped).compose(context.Background()); !tool.podmanCompose || tool.base[0] != "podman" {
+	if tool := NewEngine("podman", wrapped).compose(context.Background(), Project{}); !tool.podmanCompose || tool.base[0] != "podman" {
 		t.Errorf("podman compose wrapping podman-compose: %+v", tool)
+	}
+
+	// A podman-compose project is not handed to docker-compose, which
+	// `podman compose` prefers when both are installed.
+	docker := (&runner.Fake{}).
+		On("podman compose version", runner.Result{Stdout: ">>>> Executing external compose provider \"/usr/libexec/docker/cli-plugins/docker-compose\"\nDocker Compose version v2.40.3\n"}).
+		On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
+	if tool := NewEngine("podman", docker).compose(context.Background(), Project{PodmanCompose: true}); strings.Join(tool.base, " ") != "podman-compose" || !tool.podmanCompose {
+		t.Errorf("podman-compose project with docker-compose as provider: %+v", tool)
+	}
+	if tool := NewEngine("podman", docker).compose(context.Background(), Project{}); tool.base[0] != "podman" || tool.podmanCompose {
+		t.Errorf("docker compose project: %+v", tool)
 	}
 
 	// With a configured podman, podman-compose is told which one to use:
 	// through `podman compose` it would run the podman in PATH.
 	wrapped.On("command -v \"$1\" >/dev/null 2>&1 sh podman-compose", runner.Result{})
 	e, _ := Podman{Path: "/usr/bin/podman"}.Engine(context.Background(), wrapped)
-	if tool := e.compose(context.Background()); strings.Join(tool.base, " ") != "podman-compose --podman-path /usr/bin/podman" {
+	if tool := e.compose(context.Background(), Project{}); strings.Join(tool.base, " ") != "podman-compose --podman-path /usr/bin/podman" {
 		t.Errorf("configured podman with podman-compose: %+v", tool)
 	}
 }
