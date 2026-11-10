@@ -57,6 +57,19 @@ proxmox:
   # How often to look for guests that were created, removed, started or stopped.
   poll_interval: 1m
 
+# The container engines of the host itself (not of guests). Docker and podman
+# are found in PATH by default.
+containers:
+  podman:
+    # Podman executable to use, for when several versions are installed
+    # (e.g. a self-built one in /usr/local next to the distribution's).
+    # Empty: "podman" from PATH.
+    path: ""
+    # Manage the rootless containers of this user instead of root's. Commands
+    # run with runuser as that user; enable lingering so its runtime
+    # directory exists: loginctl enable-linger <user>. Empty: root.
+    user: ""
+
 checks:
   # How often to look for updates (also on startup and when guests start).
   interval: 6h

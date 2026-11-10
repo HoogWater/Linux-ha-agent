@@ -25,6 +25,7 @@ type Config struct {
 	Guests        Guests        `yaml:"guests"`
 	Incus         Incus         `yaml:"incus"`
 	Proxmox       Proxmox       `yaml:"proxmox"`
+	Containers    Containers    `yaml:"containers"`
 	Checks        Checks        `yaml:"checks"`
 	Upgrade       Upgrade       `yaml:"upgrade"`
 	NixOS         NixOS         `yaml:"nixos"`
@@ -91,6 +92,23 @@ type Proxmox struct {
 	Node string `yaml:"node"`
 	// How often to look for guests that were created, removed, started or stopped.
 	PollInterval time.Duration `yaml:"poll_interval"`
+}
+
+// Containers select the container engines of the host. They do not apply to
+// guests, where the engines are always found in PATH.
+type Containers struct {
+	Podman Podman `yaml:"podman"`
+}
+
+// Podman selects the podman instance managed on the host.
+type Podman struct {
+	// Path of the podman executable; empty finds podman in PATH. Use it
+	// when several versions are installed, e.g. /usr/local/bin/podman.
+	Path string `yaml:"path"`
+	// User whose rootless podman containers are managed; empty manages the
+	// containers of root. Needs runuser (util-linux) and lingering
+	// (loginctl enable-linger <user>) so the user's runtime directory exists.
+	User string `yaml:"user"`
 }
 
 // Checks control how often state is refreshed.
@@ -353,6 +371,7 @@ func (c Commands) validate() []error {
 var (
 	topicSafe = regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$`)
 	gcAge     = regexp.MustCompile(`^[0-9]+[dhm]$`)
+	userName  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
 )
 
 // Validate checks the configuration for mistakes.
@@ -383,6 +402,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Proxmox.PollInterval < 10*time.Second {
 		errs = append(errs, errors.New("proxmox.poll_interval must be at least 10s"))
+	}
+	if p := c.Containers.Podman.Path; p != "" && !path.IsAbs(p) {
+		errs = append(errs, fmt.Errorf("containers.podman.path %q must be an absolute path", p))
+	}
+	if u := c.Containers.Podman.User; u != "" && !userName.MatchString(u) {
+		errs = append(errs, fmt.Errorf("containers.podman.user %q is not a valid user name", u))
 	}
 	for _, t := range c.Guests.Types {
 		if t != "container" && t != "virtual-machine" {

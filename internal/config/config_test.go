@@ -24,9 +24,16 @@ upgrade:
   schedule: "CRON_TZ=Europe/Amsterdam 30 3 * * 0"
 permissions:
   reboot: true
+containers:
+  podman:
+    path: /usr/local/bin/podman
+    user: mark
 `))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.Containers.Podman.Path != "/usr/local/bin/podman" || cfg.Containers.Podman.User != "mark" {
+		t.Errorf("podman settings not parsed: %+v", cfg.Containers.Podman)
 	}
 	if cfg.HomeAssistant.DiscoveryPrefix != "homeassistant" || cfg.HomeAssistant.BaseTopic != "linux-ha-agent" {
 		t.Errorf("discovery defaults not applied: %+v", cfg.HomeAssistant)
@@ -63,6 +70,10 @@ upgrade:
   schedule: "every sunday"
 nixos:
   gc_older_than: forever
+containers:
+  podman:
+    path: bin/podman
+    user: "mark; reboot"
 log_level: loud
 `))
 	if err == nil {
@@ -71,6 +82,7 @@ log_level: loud
 	for _, want := range []string{
 		"mqtt.url", "password_file requires", "base_topic", "incus.enabled", "proxmox.enabled", "proxmox.poll_interval", `unknown type "pod"`,
 		"checks.interval", "upgrade.schedule", "gc_older_than", "log_level",
+		"containers.podman.path", "containers.podman.user",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing error about %q in:\n%v", want, err)

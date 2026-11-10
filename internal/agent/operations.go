@@ -79,7 +79,11 @@ func (a *Agent) check(ctx context.Context, d *Device) {
 		r.Reset()
 	}
 	local := map[string][]string{}
-	for _, e := range containers.Detect(ctx, d.Runner) {
+	engines, err := containers.Detect(ctx, d.Runner, a.podman(d))
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	for _, e := range engines {
 		c.Engines = append(c.Engines, e.Name)
 		cs, err := e.Containers(ctx)
 		if err != nil {
@@ -162,14 +166,15 @@ func (a *Agent) upgradeContainer(ctx context.Context, d *Device, key, trigger st
 	a.setOperation(d, ha.CmdUpgradeContainer)
 	ctx, cancel := a.withTimeout(ctx)
 	defer cancel()
-	e := containers.NewEngine(c.Engine, d.Runner)
+	e, err := a.engine(ctx, d, c.Engine)
 	switch {
 	case !ok:
 		report.step("container", false, fmt.Errorf("container %s is gone", key), "")
+	case err != nil:
+		report.step("container", false, err, "")
 	case c.Project != "":
 		p := containers.Project{Name: c.Project, WorkingDir: c.WorkingDir, ConfigFiles: c.ConfigFiles}
 		var changed bool
-		var err error
 		if c.Service == "" {
 			changed, err = e.UpgradeProject(ctx, p) // older compose without service labels
 		} else {
@@ -195,8 +200,10 @@ func (a *Agent) restartContainer(ctx context.Context, d *Device, key, trigger st
 	defer cancel()
 	if !ok {
 		report.step("restart", false, fmt.Errorf("container %s is gone", key), "")
+	} else if e, err := a.engine(ctx, d, c.Engine); err != nil {
+		report.step("restart "+c.Name, false, err, "")
 	} else {
-		report.step("restart "+c.Name, true, containers.NewEngine(c.Engine, d.Runner).Restart(ctx, c.ID), "")
+		report.step("restart "+c.Name, true, e.Restart(ctx, c.ID), "")
 	}
 	a.finish(ctx, d, report)
 }
@@ -305,8 +312,29 @@ func (a *Agent) snapshot(ctx context.Context, d *Device, report *RunReport) bool
 	return report.step("snapshot", false, err, name)
 }
 
+// podman returns the podman instance managed on a device: the configured one
+// on the host, the one in PATH on guests.
+func (a *Agent) podman(d *Device) containers.Podman {
+	if !d.Host {
+		return containers.Podman{}
+	}
+	return containers.Podman{Path: a.cfg.Containers.Podman.Path, User: a.cfg.Containers.Podman.User}
+}
+
+// engine returns a device's container engine by name.
+func (a *Agent) engine(ctx context.Context, d *Device, name string) (*containers.Engine, error) {
+	if name == "podman" {
+		return a.podman(d).Engine(ctx, d.Runner)
+	}
+	return containers.NewEngine(name, d.Runner), nil
+}
+
 func (a *Agent) upgradeContainers(ctx context.Context, d *Device, report *RunReport) {
-	for _, e := range containers.Detect(ctx, d.Runner) {
+	engines, err := containers.Detect(ctx, d.Runner, a.podman(d))
+	if err != nil {
+		report.step("podman", false, err, "")
+	}
+	for _, e := range engines {
 		cs, err := e.Containers(ctx)
 		if !report.step(e.Name+" containers", false, err, "") {
 			continue

@@ -27,29 +27,90 @@ const (
 type Engine struct {
 	Name string
 	r    runner.Runner
+	// prefix runs the engine as another user (rootless podman).
+	prefix []string
+	// bin is the engine executable: a name looked up in PATH or a path.
+	bin string
+	// env are extra environment variables (key, value pairs).
+	env []string
+}
+
+// Podman selects the podman instance the agent manages.
+type Podman struct {
+	// Path of the podman executable. Empty: "podman" from PATH. Set it when
+	// several podman versions are installed (e.g. /usr/local/bin/podman).
+	Path string
+	// User whose rootless podman is managed. Empty: the agent's own user
+	// (root). Commands then run with runuser as that user.
+	User string
+}
+
+func (p Podman) bin() string {
+	if p.Path != "" {
+		return p.Path
+	}
+	return "podman"
+}
+
+// Engine returns the podman engine for these settings. A user is looked up
+// on the target, as rootless podman needs its runtime directory.
+func (p Podman) Engine(ctx context.Context, r runner.Runner) (*Engine, error) {
+	e := &Engine{Name: "podman", r: r, bin: p.bin()}
+	if p.User == "" {
+		return e, nil
+	}
+	res, err := runner.Check(ctx, r, runner.Command("id", "-u", p.User))
+	if err != nil {
+		return nil, fmt.Errorf("podman user %q: %w", p.User, err)
+	}
+	uid := strings.TrimSpace(res.Stdout)
+	e.prefix = []string{"runuser", "-u", p.User, "--"}
+	e.env = []string{
+		"XDG_RUNTIME_DIR", "/run/user/" + uid,
+		// podman auto-update restarts systemd user units (Quadlets).
+		"DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/" + uid + "/bus",
+	}
+	return e, nil
 }
 
 // Detect returns the engines usable on the target. A docker command that is
-// really podman (podman-docker) is not reported twice.
-func Detect(ctx context.Context, r runner.Runner) []*Engine {
+// really podman (podman-docker) is not reported twice. The error is about a
+// configured podman that cannot be used; the other engines are still returned.
+func Detect(ctx context.Context, r runner.Runner, p Podman) ([]*Engine, error) {
 	var engines []*Engine
 	if runner.Has(ctx, r, "docker") {
 		res, err := r.Run(ctx, runner.Command("docker", "version", "--format", "{{.Server.Version}}"))
 		version, _ := r.Run(ctx, runner.Command("docker", "--version"))
 		isPodman := strings.Contains(strings.ToLower(version.Stdout), "podman")
 		if err == nil && res.ExitCode == 0 && !isPodman {
-			engines = append(engines, &Engine{Name: "docker", r: r})
+			engines = append(engines, &Engine{Name: "docker", r: r, bin: "docker"})
 		}
 	}
-	if runner.Has(ctx, r, "podman") {
-		engines = append(engines, &Engine{Name: "podman", r: r})
+	if !runner.Has(ctx, r, p.bin()) {
+		if p != (Podman{}) {
+			return engines, fmt.Errorf("podman not found at %q", p.bin())
+		}
+		return engines, nil
 	}
-	return engines
+	e, err := p.Engine(ctx, r)
+	if err != nil {
+		return engines, err
+	}
+	return append(engines, e), nil
 }
 
 // NewEngine returns an engine without detection (for tests).
 func NewEngine(name string, r runner.Runner) *Engine {
-	return &Engine{Name: name, r: r}
+	return &Engine{Name: name, r: r, bin: name}
+}
+
+// cmd builds an engine command.
+func (e *Engine) cmd(args ...string) runner.Cmd {
+	cmd := append(append(append([]string(nil), e.prefix...), e.bin), args...)
+	if len(e.env) == 0 {
+		return runner.Command(cmd...)
+	}
+	return runner.Command(cmd...).WithEnv(e.env...)
 }
 
 // Container is a container with the details the agent needs.
@@ -88,7 +149,7 @@ type inspectContainer struct {
 
 // Containers lists all containers, running or not.
 func (e *Engine) Containers(ctx context.Context) ([]Container, error) {
-	res, err := runner.Check(ctx, e.r, runner.Command(e.Name, "ps", "-a", "-q", "--no-trunc"))
+	res, err := runner.Check(ctx, e.r, e.cmd("ps", "-a", "-q", "--no-trunc"))
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +157,7 @@ func (e *Engine) Containers(ctx context.Context) ([]Container, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	res, err = runner.Check(ctx, e.r, runner.Command(append([]string{e.Name, "container", "inspect"}, ids...)...))
+	res, err = runner.Check(ctx, e.r, e.cmd(append([]string{"container", "inspect"}, ids...)...))
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +239,7 @@ func (e *Engine) RepoDigests(ctx context.Context, imageIDs []string) (map[string
 	if len(imageIDs) == 0 {
 		return map[string][]string{}, nil
 	}
-	res, err := runner.Check(ctx, e.r, runner.Command(append([]string{e.Name, "image", "inspect"}, imageIDs...)...))
+	res, err := runner.Check(ctx, e.r, e.cmd(append([]string{"image", "inspect"}, imageIDs...)...))
 	if err != nil {
 		return nil, err
 	}
@@ -208,20 +269,25 @@ func ParseImageInspect(out string) (map[string][]string, error) {
 // composeTool is the compose implementation of an engine.
 type composeTool struct {
 	base []string
+	env  []string
 	// podmanCompose is the Python podman-compose, which has fewer options.
 	podmanCompose bool
 }
 
 func (e *Engine) compose(ctx context.Context) composeTool {
 	if e.Name == "podman" {
-		res, err := e.r.Run(ctx, runner.Command("podman", "compose", "version"))
+		res, err := e.r.Run(ctx, e.cmd("compose", "version"))
 		if (err != nil || res.ExitCode != 0) && runner.Has(ctx, e.r, "podman-compose") {
-			return composeTool{base: []string{"podman-compose"}, podmanCompose: true}
+			base := append(append([]string(nil), e.prefix...), "podman-compose")
+			if e.bin != "podman" {
+				base = append(base, "--podman-path", e.bin)
+			}
+			return composeTool{base: base, env: e.env, podmanCompose: true}
 		}
 		// `podman compose` may itself delegate to podman-compose.
-		return composeTool{base: []string{"podman", "compose"}, podmanCompose: strings.Contains(res.Stdout+res.Stderr, "podman-compose")}
+		return composeTool{base: e.cmd("compose").Args, env: e.env, podmanCompose: strings.Contains(res.Stdout+res.Stderr, "podman-compose")}
 	}
-	return composeTool{base: []string{e.Name, "compose"}}
+	return composeTool{base: e.cmd("compose").Args, env: e.env}
 }
 
 // command runs compose from the project's directory, so relative file names
@@ -233,10 +299,13 @@ func (c composeTool) command(p Project, args ...string) runner.Cmd {
 		cmd = append(cmd, "-f", f)
 	}
 	cmd = append(cmd, args...)
-	if p.WorkingDir == "" {
+	if p.WorkingDir != "" {
+		cmd = append([]string{"sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", p.WorkingDir}, cmd...)
+	}
+	if len(c.env) == 0 {
 		return runner.Command(cmd...)
 	}
-	return runner.Command(append([]string{"sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", p.WorkingDir}, cmd...)...)
+	return runner.Command(cmd...).WithEnv(c.env...)
 }
 
 func (c composeTool) pull(p Project, services ...string) runner.Cmd {
@@ -289,7 +358,7 @@ func (e *Engine) upgradeCompose(ctx context.Context, p Project, services ...stri
 
 // Restart restarts one container.
 func (e *Engine) Restart(ctx context.Context, id string) error {
-	_, err := runner.Check(ctx, e.r, runner.Command(e.Name, "restart", id))
+	_, err := runner.Check(ctx, e.r, e.cmd("restart", id))
 	return err
 }
 
@@ -312,7 +381,7 @@ func (e *Engine) AutoUpdate(ctx context.Context) (bool, error) {
 	if e.Name != "podman" {
 		return false, nil
 	}
-	res, err := runner.Check(ctx, e.r, runner.Command("podman", "auto-update", "--format", "{{.Unit}}|{{.Updated}}"))
+	res, err := runner.Check(ctx, e.r, e.cmd("auto-update", "--format", "{{.Unit}}|{{.Updated}}"))
 	if err != nil {
 		return false, err
 	}
@@ -326,7 +395,7 @@ func (e *Engine) AutoUpdate(ctx context.Context) (bool, error) {
 
 // PruneImages removes dangling images and reports whether any were removed.
 func (e *Engine) PruneImages(ctx context.Context) (bool, error) {
-	res, err := runner.Check(ctx, e.r, runner.Command(e.Name, "image", "prune", "--force"))
+	res, err := runner.Check(ctx, e.r, e.cmd("image", "prune", "--force"))
 	if err != nil {
 		return false, err
 	}

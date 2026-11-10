@@ -136,6 +136,8 @@ Virtualisation platforms (both can be used on one machine; detected automaticall
 Containers, on hosts and inside guests:
 
 - **Docker** and **Podman** (a `docker` command that is really podman is detected).
+  On the host, `containers.podman.path` picks one of several installed podman
+  versions and `containers.podman.user` manages a user's rootless containers.
 - Compose projects are found from the labels compose puts on containers, so
   they are found wherever the files live. Upgrading runs `compose pull` +
   `compose up -d --remove-orphans` and only reports a change when an image
