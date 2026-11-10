@@ -1,0 +1,98 @@
+---
+# Runs the agent on a real host (the GitHub runner) that manages the rootless
+# podman containers of a user (a compose project and a Quadlet with
+# auto-update) through containers.podman.path and containers.podman.user,
+# with a broken podman first in PATH and a root container it must not touch,
+# and drives it over MQTT the way Home Assistant does.
+name: End-to-end (Podman)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "53 4 * * 1" # weekly, to catch changes in podman, images and packages
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Rootless podman on the host
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      E2E_PODMAN_USER: e2epod
+      E2E_PODMAN_PATH: /usr/bin/podman
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build the agent and the test
+        run: |
+          make build
+          go test -tags e2e -c -o e2e.test ./e2e/
+
+      - name: Install podman, podman-compose and Mosquitto
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+            podman podman-compose uidmap mosquitto mosquitto-clients
+          # Ubuntu 24.04 lets only programs with an AppArmor profile create
+          # user namespaces; rootless podman's helpers have none.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          podman --version
+          podman-compose --version
+
+      - name: Configure Mosquitto with the recommended ACL
+        run: |
+          sudo cp tests/e2e/mosquitto.conf /etc/mosquitto/conf.d/e2e.conf
+          sudo cp packaging/mosquitto/acl.conf /etc/mosquitto/e2e.acl
+          sudo mosquitto_passwd -c -b /etc/mosquitto/e2e.passwd homeassistant ha
+          sudo mosquitto_passwd -b /etc/mosquitto/e2e.passwd e2e_host agentpw
+          sudo chown mosquitto: /etc/mosquitto/e2e.passwd /etc/mosquitto/e2e.acl
+          sudo systemctl restart mosquitto
+
+      - name: Create the containers
+        run: sudo --preserve-env=E2E_PODMAN_USER,E2E_PODMAN_PATH tests/e2e/setup-podman.sh
+
+      - name: Start the agent
+        run: |
+          sudo install -d -m 0750 /etc/linux-ha-agent
+          echo agentpw | sudo tee /etc/linux-ha-agent/mqtt-password >/dev/null
+          sudo dist/linux-ha-agent-linux-amd64 -config tests/e2e/agent-podman.yaml -check-config
+          sudo systemd-run --unit linux-ha-agent --property KillMode=process \
+            "$PWD/dist/linux-ha-agent-linux-amd64" -config "$PWD/tests/e2e/agent-podman.yaml"
+
+      - name: Run the end-to-end test
+        run: |
+          sudo --preserve-env=E2E_PODMAN_USER,E2E_PODMAN_PATH \
+            ./e2e.test -test.v -test.timeout 35m -test.run '^TestPodmanHost$'
+
+      - name: Agent log and podman state
+        if: always()
+        run: |
+          sudo journalctl -u linux-ha-agent --no-pager | tee agent.log | tail -200 || true
+          sudo /usr/bin/podman ps -a || true
+          sudo runuser -u "$E2E_PODMAN_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$E2E_PODMAN_USER")" \
+            /usr/bin/podman ps -a || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-podman
+          path: agent.log
+          if-no-files-found: ignore
