@@ -220,6 +220,10 @@ jobs:
         env:
           # For pull requests GITHUB_SHA is a merge commit that only exists on GitHub.
           COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          # A pull request from a fork has its head commit only in the fork, and
+          # with GOPROXY=direct Go only looks at this repository's branches and
+          # tags. Empty for pushes and pull requests from branches here.
+          HEAD_REPO_URL: ${{ github.event.pull_request.head.repo.full_name != github.repository && github.event.pull_request.head.repo.clone_url || '' }}
           GOPROXY: direct
           # Newer git runs auto-maintenance detached after a fetch; it then
           # races with Go's next fetch in the same repository ("shallow file
@@ -231,6 +235,15 @@ jobs:
           GIT_CONFIG_VALUE_1: "0"
         run: |
           cd "$(mktemp -d)"
+          if [ -n "$HEAD_REPO_URL" ]; then
+            # Fetch the module from the fork under its real module path. The
+            # checksum database fetches from this repository, so it does not
+            # know the fork's commit either.
+            export GIT_CONFIG_COUNT=3
+            export GIT_CONFIG_KEY_2="url.${HEAD_REPO_URL}.insteadOf"
+            export GIT_CONFIG_VALUE_2=https://github.com/lvlie/linux-ha-agent
+            export GONOSUMDB=github.com/lvlie/linux-ha-agent
+          fi
           go install "github.com/lvlie/linux-ha-agent/cmd/linux-ha-agent@${COMMIT}"
           "$(go env GOPATH)/bin/linux-ha-agent" -version | tee /dev/stderr | grep -q "${COMMIT:0:12}"
 
