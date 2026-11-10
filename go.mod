@@ -10,7 +10,7 @@ require (
 	github.com/lxc/incus/v7 v7.5.1
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/robfig/cron/v3 v3.0.1
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 )
 
 require (
